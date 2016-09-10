@@ -1,0 +1,419 @@
+#!/usr/bin/python2.7
+#
+# Interface for the assignment
+#
+
+import psycopg2
+
+DATABASE_NAME = 'dds_assgn1'
+tempdb_name = 'temp'
+
+def getopenconnection(user='postgres', password='#infy123', dname='dds_assgn1'):
+    return psycopg2.connect("dbname='" + dname + "' user='" + user + "' host='localhost' password='" + password + "'")
+
+
+def loadratings(ratingstablename, ratingsfilepath, openconnection):
+    """
+    We create a DB by connecting to the default user and database of Postgres
+    The function first checks if an existing database exists for a given name, else creates it.
+    :return:None
+    """
+    # Connect to the default database
+    # con = openconnection
+
+    openconnection.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+    cur = openconnection.cursor()
+
+    # Check if an existing database with the same name exists
+    cur.execute('SELECT COUNT(*) FROM pg_catalog.pg_database WHERE datname=\'%s\'' % DATABASE_NAME)
+    count = cur.fetchone()[0]
+
+    if count == 0:
+        print('Database need to be created')
+    else:
+        cur.execute('CREATE TABLE %s (USERID int,MOVIEID int,Rating float, Timestamp INTERVAL)' % ratingstablename)  # Create the table
+        # cur.execute('CREATE TABLE TEMP (USERID int,MOVIEID int,Rating DECIMAL(2,1), Timestamp INTERVAL)')  # Create the table
+
+        fr = open('ratings.dat', 'r')
+        frstr = fr.read()
+        frstr = frstr.replace('::', ',')
+        fr.close()
+
+        fw = open('ratings.dat', 'w')
+        fw.write(frstr)
+        fw.close()
+
+        frw = open('rating.dat', 'r')
+        cur.copy_from(frw, ratingstablename, sep=",")
+        openconnection.commit()
+        frw.close()
+
+
+        # cur.execute('CREATE VIEW %s AS SELECT USERID, MOVIEID, Rating FROM %s' % (ratingstablename, tempdb_name, ))  # Create the table
+        cur.execute('ALTER TABLE %s DROP COLUMN Timestamp' % ratingstablename)
+        # print('Table altered')
+        openconnection.commit()
+        # cur.execute('copy %s(USERID,MOVIEID,Rating) FROM \'%s\' DELIMITER \',\'' % (ratingstablename, 'rating.txt', ))
+
+    # Clean up
+    cur.close()
+    openconnection.close()
+
+
+def rangepartition(ratingstablename, numberofpartitions, openconnection):
+    """
+    We create a DB by connecting to the default user and database of Postgres
+    The function first checks if an existing database exists for a given name, else creates it.
+    :return:None
+    """
+    # Connect to the default database
+    # con = openconnection
+
+    openconnection.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+    cur = openconnection.cursor()
+
+    # Check if an existing database with the same name exists
+    cur.execute('SELECT COUNT(*) FROM pg_catalog.pg_database WHERE datname=\'%s\'' % DATABASE_NAME)
+    count = cur.fetchone()[0]
+
+    if count == 0:
+        print('Database need to be created')
+    else:
+        # print('Range Partition')
+
+        iteration = 0.0
+        partitioniteration = 0
+
+        while partitioniteration < float(numberofpartitions):
+            viewname = ratingstablename+str(partitioniteration+1)
+            iterationconstant = 5.0/float(numberofpartitions)
+            lowerlimit = float(partitioniteration) * iterationconstant
+            upperlimit = lowerlimit + iterationconstant
+            if partitioniteration == 0:
+                # cur.execute('CREATE VIEW %s AS SELECT USERID, MOVIEID, Rating FROM %s where rating >= %f and rating <= %f' % (viewname, tempdb_name, lowerlimit, upperlimit, ))
+                # print('iteration %d' % partitioniteration)
+                cur.execute('CREATE TABLE %s (CHECK (rating >= %f and rating <= %f )) INHERITS (%s)' % (viewname, lowerlimit, upperlimit, ratingstablename, ))
+                cur.execute('INSERT INTO %s SELECT USERID, MOVIEID, Rating FROM %s where rating >= %f and rating <= %f' % (viewname, ratingstablename, lowerlimit, upperlimit, ))
+            else:
+                # cur.execute('CREATE VIEW %s AS SELECT USERID, MOVIEID, Rating FROM %s where rating > %f and rating <= %f' % (viewname, tempdb_name, lowerlimit, upperlimit, ))
+                # print('iteration %d' % partitioniteration)
+                cur.execute('CREATE TABLE %s (CHECK ( rating > %f and rating <= %f )) INHERITS (%s)' % (viewname, lowerlimit, upperlimit, ratingstablename, ))
+                cur.execute('INSERT INTO %s SELECT USERID, MOVIEID, Rating FROM %s where rating > %f and rating <= %f' % (viewname, ratingstablename, lowerlimit, upperlimit, ))
+            iteration += iterationconstant
+            partitioniteration += 1
+
+        cur.execute('create table metadata (name varchar, numberofpartition int)')
+        cur.execute('insert into metadata (name, numberofpartition) values (\'%s\', %d)' % (ratingstablename, numberofpartitions))
+        openconnection.commit()
+
+    cur.close()
+    openconnection.close()
+
+
+def roundrobinpartition(ratingstablename, numberofpartitions, openconnection):
+    """
+    We create a DB by connecting to the default user and database of Postgres
+    The function first checks if an existing database exists for a given name, else creates it.
+    :return:None
+    """
+    # Connect to the default database
+    # con = openconnection
+
+    openconnection.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+    cur = openconnection.cursor()
+
+    # Check if an existing database with the same name exists
+    cur.execute('SELECT COUNT(*) FROM pg_catalog.pg_database WHERE datname=\'%s\'' % DATABASE_NAME)
+    count = cur.fetchone()[0]
+
+    if count == 0:
+        print('Database need to be created')
+    else:
+        # print('Round Robin Partition')
+
+        # cur.execute('select count(*) from %s' % ratingstablename)
+        # rowcount = cur.fetchone()[0]
+
+        partitioniteration = 0
+
+        while partitioniteration < numberofpartitions:
+            table_name = ratingstablename+str(partitioniteration+1)
+            cur.execute('create table %s (USERID int,MOVIEID int,Rating float)' % (table_name, ))
+            partitioniteration += 1
+
+        count = 0
+        # print('Tables created')
+
+        cur.execute('select * from %s' % ratingstablename)
+        rs = cur.fetchall()
+
+        for row in rs:
+            # print(row)
+            if count == numberofpartitions:
+                count = 0
+
+            viewname = ratingstablename+str(count+1)
+            # print(row)
+            query = 'insert into ' + viewname + ' (USERID, MOVIEID, Rating) values ' + format(row)
+            # print(query)
+            cur.execute(query)
+            count += 1
+
+        # print('Values created')
+
+        cur.execute('create table metadata (name varchar, numberofpartition int)')
+        cur.execute('insert into metadata (name, numberofpartition) values (\'%s\', %d)' % (ratingstablename, numberofpartitions))
+
+    openconnection.commit()
+
+    cur.close()
+    openconnection.close()
+
+
+
+def roundrobininsert(ratingstablename, userid, itemid, rating, openconnection):
+    """
+    We create a DB by connecting to the default user and database of Postgres
+    The function first checks if an existing database exists for a given name, else creates it.
+    :return:None
+    """
+    # Connect to the default database
+    # con = openconnection
+
+    openconnection.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+    cur = openconnection.cursor()
+
+    # Check if an existing database with the same name exists
+    cur.execute('SELECT COUNT(*) FROM pg_catalog.pg_database WHERE datname=\'%s\'' % DATABASE_NAME)
+    count = cur.fetchone()[0]
+
+    if count == 0:
+        print('Database need to be created')
+    else:
+        # print('Round Robin Insert')
+
+        # cur.execute('select count(*) from %s' % ratingstablename)
+        # rowcount = cur.fetchone()[0]
+
+        partitioniteration = 0
+
+        cur.execute('select * from metadata')  # Create the database
+        # print('Query executed')
+        tablemetadata = cur.fetchall()
+        # print(tablemetadata)
+        listarray = []
+
+        numberpartitions = int(tablemetadata[0][1])
+        # print(numberpartitions)
+
+        while partitioniteration < numberpartitions:
+            table_name = ratingstablename+str(partitioniteration+1)
+            # print(table_name)
+            cur.execute('select count(*) from %s' % (table_name, ))
+            rs = cur.fetchall()
+            # print(rs)
+            listarray.append(rs)
+            partitioniteration += 1
+
+        # print(listarray)
+        # print(min(listarray))
+        # print(listarray.index(min(listarray)))
+
+        table = ratingstablename+str((listarray.index(min(listarray))) + 1)
+        # print(table)
+
+        cur.execute('insert into %s values (%d, %d, %f)' % (table, userid, itemid, rating, ))
+        # print('Row inserted successfully into %s' % table)
+
+    cur.close()
+    openconnection.close()
+
+
+def rangeinsert(ratingstablename, userid, itemid, rating, openconnection):
+    """
+    We create a DB by connecting to the default user and database of Postgres
+    The function first checks if an existing database exists for a given name, else creates it.
+    :return:None
+    """
+    # Connect to the default database
+    # con = openconnection
+
+    openconnection.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+    cur = openconnection.cursor()
+
+    # Check if an existing database with the same name exists
+    cur.execute('SELECT COUNT(*) FROM pg_catalog.pg_database WHERE datname=\'%s\'' % DATABASE_NAME)
+    count = cur.fetchone()[0]
+
+    if count == 0:
+        print('Database need to be created')
+    else:
+        # print('Range Partition')
+
+        iteration = 0.0
+        partitioniteration = 0
+
+        cur.execute('select * from metadata')  # Create the database
+        # print('Query executed')
+        tablemetadata = cur.fetchall()
+        # print(tablemetadata)
+
+        numberofpartitions = tablemetadata[0][1]
+
+        arraylist = []
+
+        while partitioniteration < float(numberofpartitions):
+            viewname = ratingstablename+str(partitioniteration+1)
+            iterationconstant = 5.0/float(numberofpartitions)
+            lowerlimit = float(partitioniteration) * iterationconstant
+            upperlimit = lowerlimit + iterationconstant
+
+            arraylist.append([viewname, lowerlimit, upperlimit])
+            partitioniteration += 1
+
+        # print(arraylist)
+
+        for i in range(0, numberofpartitions):
+            if i == 0:
+                if rating >= arraylist[i][1] and rating <= arraylist[i][2]:
+                    cur.execute('INSERT INTO %s (USERID, MOVIEID, Rating) values (%d , %d , %f)' % (arraylist[i][0], userid, itemid, rating, ))
+                else:
+                    continue
+            else:
+                if rating > arraylist[i][1] and rating <= arraylist[i][2]:
+                    cur.execute('INSERT INTO %s (USERID, MOVIEID, Rating) values (%d , %d , %f)' % (arraylist[i][0], userid, itemid, rating, ))
+                else:
+                    continue
+
+        openconnection.commit()
+
+    cur.close()
+    openconnection.close()
+
+def deletepartition():
+    """
+    We create a DB by connecting to the default user and database of Postgres
+    The function first checks if an existing database exists for a given name, else creates it.
+    :return:None
+    """
+    # Connect to the default database
+    con = getopenconnection()
+    con.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+    cur = con.cursor()
+
+    # print('Delete Partition')
+
+    # Check if an existing database with the same name exists
+    cur.execute('SELECT COUNT(*) FROM pg_catalog.pg_database WHERE datname=\'%s\'' % DATABASE_NAME)
+    count = cur.fetchone()[0]
+    if count == 0:
+        print 'A database named {0} need to be created'.format(DATABASE_NAME)
+    else:
+        cur.execute('select * from metadata')  # Create the database
+        # print('Query executed')
+        tablemetadata = cur.fetchall()
+        # print(tablemetadata)
+
+        count = 0
+        # print('Table metadata : Table name : %s Number of Partitions : %d ' % (tablemetadata[0][0], tablemetadata[0][1], ))
+        while count < tablemetadata[0][1]:
+            table = tablemetadata[0][0]+str(count+1)
+            cur.execute('drop table %s' % table)# Create the database
+            count += 1
+
+        # print('Tables dropped')
+
+        cur.execute('drop table metadata')
+
+        # print('Self destroy metadata table')
+
+    # Clean up
+    cur.close()
+    con.close()
+
+def create_db(dbname):
+    """
+    We create a DB by connecting to the default user and database of Postgres
+    The function first checks if an existing database exists for a given name, else creates it.
+    :return:None
+    """
+    # Connect to the default database
+    con = getopenconnection(dname='postgres')
+    con.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+    cur = con.cursor()
+
+    # Check if an existing database with the same name exists
+    cur.execute('SELECT COUNT(*) FROM pg_catalog.pg_database WHERE datname=\'%s\'' % (dbname,))
+    count = cur.fetchone()[0]
+    if count == 0:
+        cur.execute('CREATE DATABASE %s' % (dbname,))  # Create the database
+        print 'A database named {0} has been created'.format(dbname)
+    else:
+        print 'A database named {0} already exists'.format(dbname)
+
+    # Clean up
+    cur.close()
+    con.close()
+
+
+# Middleware
+def before_db_creation_middleware():
+    # Use it if you want to
+    pass
+
+
+def after_db_creation_middleware(databasename):
+    # Use it if you want to
+    # Here is where I will start calling your functions to test them. For example,
+    loadratings('ratings', 'ratings.dat', getopenconnection())
+
+    rangepartition('ratings', 5, getopenconnection())
+    rangeinsert('ratings', 2, 136, 4.5, getopenconnection())
+    deletepartition()
+
+    roundrobinpartition('ratings', 5, getopenconnection())
+    roundrobininsert('ratings', 4, 136, 4.5, getopenconnection())
+    deletepartition()
+
+    # roundrobinpartition('ratings', 5, getopenconnection())
+
+
+def before_test_script_starts_middleware(openconnection, databasename):
+    # Use it if you want to
+    pass
+
+
+def after_test_script_ends_middleware(openconnection, databasename):
+    # Use it if you want to
+    pass
+
+
+if __name__ == '__main__':
+    try:
+
+        # Use this function to do any set up before creating the DB, if any
+        # before_db_creation_middleware()
+
+        create_db(DATABASE_NAME)
+
+        # Use this function to do any set up after creating the DB, if any
+        after_db_creation_middleware(DATABASE_NAME)
+
+        with getopenconnection() as con:
+            # Use this function to do any set up before I starting calling your functions to test, if you want to
+            # before_test_script_starts_middleware(con, DATABASE_NAME)
+
+            # print('LOAD RATINGS')
+
+            # Here is where I will start calling your functions to test them. For example,
+            # loadratings('ratings.dat', con)
+            # ###################################################################################
+            # Anything in this area will not be executed as I will call your functions directly
+            # so please add whatever code you want to add in main, in the middleware functions provided "only"
+            # ###################################################################################
+
+            # Use this function to do any set up after I finish testing, if you want to
+            after_test_script_ends_middleware(con, DATABASE_NAME)
+
+    except Exception as detail:
+        print "OOPS! This is the error ==> ", detail
